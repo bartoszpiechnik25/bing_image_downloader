@@ -4,6 +4,12 @@ import urllib
 import imghdr
 import posixpath
 import re
+import sys, torch
+import torchvision.transforms as T
+import io
+from PIL import Image
+from collections import defaultdict
+from typing import Callable
 
 '''
 Python api to download image form Bing.
@@ -12,7 +18,17 @@ Author: Guru Prasad (g.gaurav541@gmail.com)
 
 
 class Bing:
-    def __init__(self, query, limit, output_dir, adult, timeout,  filter='', verbose=True):
+    def __init__(self,
+                 query: str,
+                 limit: int,
+                 output_dir: str,
+                 adult: bool,
+                 timeout: int,
+                 model: torch.nn.Module,
+                 transforms: T.Compose,
+                 similarity_func: Callable,
+                 filter: str = '',
+                 verbose: bool = True):
         self.download_count = 0
         self.query = query
         self.output_dir = output_dir
@@ -20,6 +36,10 @@ class Bing:
         self.filter = filter
         self.verbose = verbose
         self.seen = set()
+        self.model = model
+        self.downloaded_images: defaultdict = defaultdict()
+        self.transforms = transforms
+        self.similarity_func = similarity_func
 
         assert type(limit) == int, "limit must be integer"
         self.limit = limit
@@ -52,17 +72,22 @@ class Bing:
             else:
                 return ""
 
-
-    def save_image(self, link, file_path):
+    def save_image(self, link, file_path: Path):
         request = urllib.request.Request(link, None, self.headers)
         image = urllib.request.urlopen(request, timeout=self.timeout).read()
         if not imghdr.what(None, image):
             print('[Error]Invalid image, not saving {}\n'.format(link))
             raise ValueError('Invalid image, not saving {}\n'.format(link))
-        with open(str(file_path), 'wb') as f:
-            f.write(image)
+        img = Image.open(io.BytesIO(image)).convert('RGB').resize((384, 384))
+        img = self.checkSimilarities(img, file_path.name).save(file_path, 'JPEG')
 
-    
+    def checkSimilarities(self, image: Image, name: str) -> Image:
+        for img_name, img in self.downloaded_images.items():
+            if (similarity := self.similarity_func(image, img, self.model, self.transforms)) > 0.5:
+                raise ValueError(f'Image is too similar to {img_name} --> {similarity}')
+        self.downloaded_images[name] = image
+        return image
+
     def download_image(self, link):
         self.download_count += 1
         # Get the image link
@@ -76,7 +101,7 @@ class Bing:
             if self.verbose:
                 # Download the image
                 print("[%] Downloading Image #{} from {}".format(self.download_count, link))
-                
+            
             self.save_image(link, self.output_dir.joinpath("Image_{}.{}".format(
                 str(self.download_count), file_type)))
             if self.verbose:
